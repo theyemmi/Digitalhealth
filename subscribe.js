@@ -1,90 +1,104 @@
-// Vercel serverless function: POST /api/subscribe
-// Adds the person to your Mailchimp audience using the API key stored
-// as an environment variable (never exposed to the browser).
-//
-// Required environment variables (set in Vercel → Project → Settings → Environment Variables):
-//   MAILCHIMP_API_KEY        32 chars + a dash + your server prefix, e.g. -us21
-//   MAILCHIMP_SERVER_PREFIX  the part after the dash in your API key, e.g. us21
-//   MAILCHIMP_LIST_ID        your Audience ID (Audience > Settings > Audience name and defaults)
+const crypto = require('crypto');
 
-module.exports = async (req, res) => {
+function json(res, status, body) {
+  res.statusCode = status;
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.end(JSON.stringify(body));
+}
+
+module.exports = async function handler(req, res) {
   if (req.method !== 'POST') {
-    res.status(405).json({ error: 'Method not allowed' });
-    return;
+    res.setHeader('Allow', 'POST');
+    return json(res, 405, { error: 'Method not allowed' });
   }
 
-  let body = req.body;
-  if (typeof body === 'string') {
-    try { body = JSON.parse(body); } catch (e) { body = {}; }
-  }
-  const { name, email, score, weakPillar, pillars } = body || {};
+  const apiKey = process.env.MAILCHIMP_API_KEY;
+  const listId = process.env.MAILCHIMP_LIST_ID;
+  const statusIfNew = process.env.MAILCHIMP_STATUS_IF_NEW || 'pending';
 
-  const emailOk = typeof email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-  if (!emailOk) {
-    res.status(400).json({ error: 'A valid email is required' });
-    return;
+  if (!apiKey || !listId) {
+    console.error('Missing MAILCHIMP_API_KEY or MAILCHIMP_LIST_ID');
+    return json(res, 500, { error: 'Mailchimp is not configured' });
   }
 
-  const API_KEY = process.env.MAILCHIMP_API_KEY;
-  const SERVER = process.env.MAILCHIMP_SERVER_PREFIX;
-  const LIST_ID = process.env.MAILCHIMP_LIST_ID;
-
-  if (!API_KEY || !SERVER || !LIST_ID) {
-    console.error('Missing Mailchimp environment variables');
-    res.status(500).json({ error: 'Mailchimp is not configured on the server' });
-    return;
+  if (!['pending', 'subscribed'].includes(statusIfNew)) {
+    return json(res, 500, {
+      error: 'MAILCHIMP_STATUS_IF_NEW must be pending or subscribed'
+    });
   }
-
-  // Simple score bucket + weak pillar as tags, so you can segment in Mailchimp
-  // without needing to create custom merge fields first.
-  const scoreBucket =
-    typeof score === 'number'
-      ? score >= 80 ? 'score-80-100'
-      : score >= 60 ? 'score-60-79'
-      : score >= 40 ? 'score-40-59'
-      : 'score-0-39'
-      : null;
-
-  const tags = ['performance-diagnostic'];
-  if (weakPillar) tags.push('weak-' + String(weakPillar).toLowerCase());
-  if (scoreBucket) tags.push(scoreBucket);
 
   try {
-    const mcRes = await fetch(
-      `https://${SERVER}.api.mailchimp.com/3.0/lists/${LIST_ID}/members`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `apikey ${API_KEY}`,
-        },
-        body: JSON.stringify({
-          email_address: email,
-          status: 'subscribed', // change to 'pending' if you want double opt-in
-          merge_fields: {
-            FNAME: name || '',
-          },
-          tags,
-        }),
-      }
-    );
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
+    const name = String(body.name || '').trim();
+    const email = String(body.email || '').trim().toLowerCase();
+    const score = Number(body.score);
+    const weakPillar = String(body.weakPillar || '').trim();
+    const pillars = body.pillars || {};
 
-    const data = await mcRes.json();
-
-    if (!mcRes.ok) {
-      // Mailchimp returns 400 "Member Exists" if they already subscribed — treat as success.
-      if (data.title === 'Member Exists') {
-        res.status(200).json({ ok: true, note: 'already subscribed' });
-        return;
-      }
-      console.error('Mailchimp error:', data);
-      res.status(mcRes.status).json({ error: data.detail || 'Mailchimp error' });
-      return;
+    if (!name || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return json(res, 400, { error: 'Valid name and email are required' });
     }
 
-    res.status(200).json({ ok: true });
-  } catch (err) {
-    console.error('Subscribe request failed:', err);
-    res.status(500).json({ error: 'Server error contacting Mailchimp' });
+    const dc = apiKey.split('-').pop();
+    if (!dc) return json(res, 500, { error: 'Invalid Mailchimp API key format' });
+
+    const subscriberHash = crypto.createHash('md5').update(email).digest('hex');
+
+    const scoreBucket = Number.isFinite(score)
+      ? score >= 80 ? 'score-80-plus'
+      : score >= 60 ? 'score-60-79'
+      : score >= 40 ? 'score-40-59'
+      : 'score-below-40'
+      : 'score-unknown';
+
+    const tags = [
+      { name: 'performance-diagnostic', status: 'active' },
+      { name: scoreBucket, status: 'active' }
+    ];
+
+    if (weakPillar) {
+      tags.push({
+        name: `weak-${weakPillar.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+        status: 'active'
+      });
+    }
+
+    const url = `https://${dc}.api.mailchimp.com/3.0/lists/${encodeURIComponent(listId)}/members/${subscriberHash}`;
+    const auth = Buffer.from(`key:${apiKey}`).toString('base64');
+
+    const mcResponse = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Basic ${auth}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        email_address: email,
+        status_if_new: statusIfNew,
+        merge_fields: {
+          FNAME: name,
+          ENERGY: Number(pillars.Energy) || 0,
+          SLEEP: Number(pillars.Sleep) || 0,
+          STRESS: Number(pillars.Stress) || 0,
+          DECISIONS: Number(pillars.Decisions) || 0,
+          BODY: Number(pillars.Body) || 0
+        },
+        tags
+      })
+    });
+
+    const data = await mcResponse.json().catch(() => ({}));
+
+    if (!mcResponse.ok) {
+      console.error('Mailchimp error:', data);
+      return json(res, mcResponse.status >= 500 ? 502 : mcResponse.status, {
+        error: data.detail || data.title || 'Mailchimp request failed'
+      });
+    }
+
+    return json(res, 200, { ok: true });
+  } catch (error) {
+    console.error('Subscribe handler error:', error);
+    return json(res, 500, { error: 'Unable to save contact' });
   }
 };
