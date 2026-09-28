@@ -15,7 +15,7 @@ module.exports = async function handler(req, res) {
   const apiKey = process.env.MAILCHIMP_API_KEY;
   const listId = process.env.MAILCHIMP_LIST_ID;
   const statusIfNew =
-    process.env.MAILCHIMP_STATUS_IF_NEW || 'pending';
+    process.env.MAILCHIMP_STATUS_IF_NEW || 'subscribed';
 
   if (!apiKey || !listId) {
     console.error(
@@ -81,7 +81,6 @@ module.exports = async function handler(req, res) {
             : 'score-below-40'
       : 'score-unknown';
 
-    // Mailchimp expects tag names as strings.
     const tags = [
       'performance-diagnostic',
       scoreBucket
@@ -115,6 +114,7 @@ module.exports = async function handler(req, res) {
 
         merge_fields: {
           FNAME: name,
+          OVERALL: Number.isFinite(score) ? score : 0,
           ENERGY: Number(pillars.Energy) || 0,
           SLEEP: Number(pillars.Sleep) || 0,
           STRESS: Number(pillars.Stress) || 0,
