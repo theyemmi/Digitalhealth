@@ -2346,10 +2346,23 @@ async function unlockResults() {
 
   show('s-result');
 
+  const fixForEmail = FIXES[weakPillar];
+  const protocol = fixForEmail.steps.map(([t, d, w]) => `${t} — ${d} (When: ${w})`);
+
   fetch('/api/subscribe', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, email, score: finalScore, weakPillar, pillars: pP })
+    body: JSON.stringify({
+      name,
+      email,
+      score: finalScore,
+      weakPillar,
+      band: getBand(finalScore),
+      fixTitle: fixForEmail.t,
+      fixBody: fixForEmail.b,
+      protocol,
+      pillars: pP
+    })
   }).then(async res => {
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
